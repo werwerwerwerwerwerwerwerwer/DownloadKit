@@ -5,6 +5,7 @@
 @File    :   downloadKit.py
 """
 from copy import copy
+from os.path import sep
 from pathlib import Path
 from queue import Queue
 from re import sub
@@ -14,22 +15,23 @@ from time import sleep, perf_counter
 from requests import Response
 from requests.structures import CaseInsensitiveDict
 
-from ._funcs import FileExistsSetter, PathSetter, BlockSizeSetter, set_charset, get_file_info
+from ._funcs import FileExistsSetter, PathSetter, BlockSizeSetter, set_charset, get_file_info, get_file_exists_mode
 from .mission import Task, Mission
 from .setter import Setter
 
 
 class DownloadKit(object):
     file_exists = FileExistsSetter()
-    goal_path = PathSetter()
+    save_path = PathSetter()
     block_size = BlockSizeSetter()
 
-    def __init__(self, goal_path=None, roads=10, session=None, file_exists='rename', driver=None):
+    def __init__(self, save_path=None, roads=10, driver=None,
+                 file_exists='rename', session=None, goal_path=None):  # session和goal_path即将废弃
         """
-        :param goal_path: 文件保存路径
+        :param save_path: 文件保存路径
         :param roads: 可同时运行的线程数
-        :param file_exists: 有同名文件名时的处理方式，可选 'skip', 'overwrite', 'rename', 'add'
         :param driver: 使用的Session对象，或配置对象、页面对象等
+        :param file_exists: 有同名文件名时的处理方式，可选 'skip', 'overwrite', 'rename', 'add', 's', 'o', 'r', 'a'
         """
         self._roads = roads
         self._missions = {}
@@ -43,31 +45,34 @@ class DownloadKit(object):
         self._retry = None
         self._interval = None
         self._timeout = None
-        self._copy_cookies = False
+        self._encoding = None
 
         self._setter = None
         self._print_mode = None
         self._log_mode = None
         self._logger = None
 
-        self.goal_path = goal_path or '.'
+        self.save_path = goal_path or save_path or '.'  # goal_path即将废弃
         self.file_exists = file_exists
         self.split = True
         self.block_size = '50M'
         self.set.driver(session or driver)
 
-    def __call__(self, file_url, goal_path=None, rename=None, file_exists=None, show_msg=True, **kwargs):
+    def __call__(self, file_url, save_path=None, rename=None, suffix=None,
+                 file_exists=None, show_msg=True, goal_path=None, **kwargs):  # goal_path即将废弃
         """以阻塞的方式下载一个文件并返回结果
         :param file_url: 文件网址
-        :param goal_path: 保存路径
+        :param save_path: 保存路径
         :param rename: 重命名的文件名
-        :param file_exists: 遇到同名文件时的处理方式，可选 'skip', 'overwrite', 'rename', 'add'，默认跟随实例属性
+        :param suffix: 指定后缀名
+        :param file_exists: 遇到同名文件时的处理方式，可选 'skip', 'overwrite', 'rename', 'add', 's', 'o', 'r', 'a'，默认跟随实例属性
         :param show_msg: 是否打印进度
         :param kwargs: 连接参数
         :return: 任务结果和信息组成的tuple
         """
-        return self.download(file_url=file_url, goal_path=goal_path, rename=rename, file_exists=file_exists,
-                             show_msg=show_msg, **kwargs)
+        save_path = goal_path or save_path  # goal_path即将废弃
+        return self.download(file_url=file_url, save_path=save_path, rename=rename, suffix=suffix,
+                             file_exists=file_exists, show_msg=show_msg, **kwargs)
 
     @property
     def set(self):
@@ -131,33 +136,43 @@ class DownloadKit(object):
         """用list方式返回所有任务对象"""
         return self._missions
 
-    def add(self, file_url, goal_path=None, rename=None, file_exists=None, split=None, **kwargs):
+    @property
+    def encoding(self):
+        """返回指定的编码格式"""
+        return self._encoding
+
+    def add(self, file_url, save_path=None, rename=None, suffix=None,
+            file_exists=None, split=None, goal_path=None, **kwargs):  # goal_path即将废弃
         """添加一个下载任务并将其返回
         :param file_url: 文件网址
-        :param goal_path: 保存路径
+        :param save_path: 保存路径
         :param rename: 重命名的文件名
-        :param file_exists: 遇到同名文件时的处理方式，可选 'skip', 'overwrite', 'rename', 'add'，默认跟随实例属性
+        :param suffix: 重命名的文件后缀名
+        :param file_exists: 遇到同名文件时的处理方式，可选 'skip', 'overwrite', 'rename', 'add', 's', 'o', 'r', 'a'，默认跟随实例属性
         :param split: 是否允许多线程分块下载，为None则使用对象属性
         :param kwargs: 连接参数
         :return: 任务对象
         """
         self._missions_num += 1
         self._running_count += 1
-        mission = Mission(self._missions_num, self, file_url,
-                          str(goal_path or self.goal_path),
-                          rename, file_exists or self.file_exists,
-                          self.split if split is None else split,
+        if file_exists is not None:
+            file_exists = get_file_exists_mode(file_exists)
+        save_path = goal_path or save_path  # goal_path即将废弃
+        mission = Mission(self._missions_num, self, file_url, str(save_path or self.save_path), rename, suffix,
+                          file_exists or self.file_exists, self.split if split is None else split, self._encoding,
                           kwargs)
         self._missions[self._missions_num] = mission
         self._run_or_wait(mission)
         return mission
 
-    def download(self, file_url, goal_path=None, rename=None, file_exists=None, show_msg=True, **kwargs):
+    def download(self, file_url, save_path=None, rename=None, suffix=None,
+                 file_exists=None, show_msg=True, goal_path=None, **kwargs):  # goal_path即将废弃
         """以阻塞的方式下载一个文件并返回结果
         :param file_url: 文件网址
-        :param goal_path: 保存路径
+        :param save_path: 保存路径
         :param rename: 重命名的文件名
-        :param file_exists: 遇到同名文件时的处理方式，可选 'skip', 'overwrite', 'rename', 'add'，默认跟随实例属性
+        :param suffix: 重命名的文件后缀名
+        :param file_exists: 遇到同名文件时的处理方式，可选 'skip', 'overwrite', 'rename', 'add', 's', 'o', 'r', 'a'，默认跟随实例属性
         :param show_msg: 是否打印进度
         :param kwargs: 连接参数
         :return: 任务结果和信息组成的tuple
@@ -165,7 +180,8 @@ class DownloadKit(object):
         if show_msg:
             tmp = self._print_mode
             self._print_mode = None
-        r = self.add(file_url=file_url, goal_path=goal_path, rename=rename, file_exists=file_exists,
+        save_path = goal_path or save_path  # goal_path即将废弃
+        r = self.add(file_url=file_url, save_path=save_path, rename=rename, suffix=suffix, file_exists=file_exists,
                      split=False, **kwargs).wait(show=show_msg)
         if show_msg:
             self._print_mode = tmp
@@ -234,7 +250,7 @@ class DownloadKit(object):
                 self.show(False)
             else:
                 end_time = perf_counter() + timeout
-                while self.is_running or (perf_counter() < end_time or timeout == 0):
+                while self.is_running and (perf_counter() < end_time or timeout == 0):
                     sleep(0.1)
 
     def cancel(self):
@@ -288,18 +304,21 @@ class DownloadKit(object):
 
         print()
 
-    def _connect(self, url, session, method, **kwargs):
+    def _connect(self, url, session, _headers, method, encoding, **kwargs):
         """生成response对象
         :param url: 目标url
         :param session: 用于连接的Session对象
+        :param _headers: 内置的headers参数
         :param method: 请求方式
+        :param encoding: 编码格式
         :param kwargs: 连接参数
         :return: tuple，第一位为Response或None，第二位为出错信息或'Success'
         """
+        kwargs = CaseInsensitiveDict(kwargs)
         if 'headers' in kwargs:  # 不知道为什么添加这个才能正常使用多线程
-            kwargs['headers'] = CaseInsensitiveDict(kwargs['headers'])
+            kwargs['headers'] = CaseInsensitiveDict({**_headers, **kwargs['headers']})
         else:
-            kwargs['headers'] = CaseInsensitiveDict()
+            kwargs['headers'] = _headers
 
         r = err = None
         for i in range(self.retry + 1):
@@ -310,7 +329,7 @@ class DownloadKit(object):
                     r = session.post(url, **kwargs)
 
                 if r:
-                    return set_charset(r), 'Success'
+                    return set_charset(r, encoding), 'Success'
 
             except Exception as e:
                 err = e
@@ -349,10 +368,12 @@ class DownloadKit(object):
         if self._log_mode == 'all' or (self._log_mode == 'failed' and mission.result is False):
             data = ('下载结果',
                     mission.data.url,
-                    mission.data.goal_path,
+                    mission.data.save_path,
                     mission.data.rename,
                     mission.data.kwargs)
             self._logger.add_data(data)
+
+        mission.session.close()
 
     def _download(self, mission_or_task, thread_id):
         """此方法是执行下载的线程方法，用于根据任务下载文件
@@ -372,7 +393,8 @@ class DownloadKit(object):
             kwargs = copy(mission_or_task.data.kwargs)
             task = mission_or_task
             kwargs['headers']['Range'] = f"bytes={task.range[0]}-{task.range[1]}"
-            r, inf = self._connect(file_url, task.mission.session, task.mission.method, **kwargs)
+            r, inf = self._connect(file_url, task.mission.session, task.mission.headers,
+                                   task.mission.method, task.mission.encoding, **kwargs)
 
             if r:
                 _do_download(r, task, False)
@@ -392,24 +414,27 @@ class DownloadKit(object):
             self._logger.add_data(('开始下载', mission.data.url))
 
         rename = mission.data.rename
-        goal_path = mission.data.goal_path
+        suffix = mission.data.suffix
+        goal_Path = Path(mission.data.save_path)
         file_exists = mission.data.file_exists
         split = mission.data.split
 
-        goal_Path = Path(goal_path)
-        # 按windows规则去除路径中的非法字符
-        goal_path = goal_Path.anchor + sub(r'[*:|<>?"]', '', goal_path.lstrip(goal_Path.anchor)).strip()
-        goal_Path = Path(goal_path).absolute()
+        parts = goal_Path.parts
+        if len(parts) > 1:  # 按windows规则去除路径中的非法字符
+            goal_Path = Path(goal_Path.anchor + sub(r'[*:|<>?"]', '', sep.join(parts[1:])).strip())
+        goal_Path = goal_Path.absolute()
         goal_Path.mkdir(parents=True, exist_ok=True)
-        goal_path = str(goal_Path)
+        save_path = str(goal_Path)
 
-        if file_exists == 'skip' and rename and (goal_Path / rename).exists():
-            mission.file_name = rename
-            mission._set_path(goal_Path / rename)
-            mission._set_done('skipped', str(mission.path))
-            return
+        if file_exists == 'skip' and rename:
+            tmp = goal_Path / rename
+            if tmp.exists() and tmp.is_file():
+                mission.file_name = rename
+                mission._set_path(goal_Path / rename)
+                mission._set_done('skipped', str(mission.path))
+                return
 
-        r, inf = self._connect(file_url, mission.session, mission.method, **kwargs)
+        r, inf = self._connect(file_url, mission.session, mission.headers, mission.method, mission.encoding, **kwargs)
 
         if mission.is_done:
             return
@@ -419,12 +444,13 @@ class DownloadKit(object):
             return
 
         # -------------------获取文件信息-------------------
-        file_info = get_file_info(r, goal_path, rename, file_exists, self._lock)
+        file_info = get_file_info(r, save_path, rename, suffix, file_exists, mission.encoding, self._lock)
         file_size = file_info['size']
         full_path = file_info['path']
         mission._set_path(full_path)
         mission.file_name = full_path.name
         mission.size = file_size
+        mission._overwrote = file_info['overwrite']
 
         if file_info['skip']:
             mission._set_done('skipped', str(mission.path))
